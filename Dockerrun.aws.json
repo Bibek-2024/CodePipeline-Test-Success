@@ -1,0 +1,10 @@
+{
+  "AWSEBDockerrunVersion": "1",
+  "Image": {
+    "Name": "845561723983.dkr.ecr.ap-south-1.amazonaws.com/mini-devops-test:latest",
+    "Update": "true"
+  },
+  "Ports": [
+    { "ContainerPort": 80 }
+  ]
+}
