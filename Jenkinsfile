@@ -2,79 +2,91 @@ pipeline {
     agent any
     
     environment {
+        // AWS Configuration
         AWS_ACCOUNT_ID = "845561723983"
         AWS_REGION     = "ap-south-1"
         ECR_REPO_NAME  = "mini-devops-test"
         ECR_URL        = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
         FULL_IMAGE_NAME = "${ECR_URL}/${ECR_REPO_NAME}"
-        // Current build number for unique tagging
+        
+        // Port Mapping
+        EXTERNAL_PORT  = "80"
+        INTERNAL_PORT  = "3000"
+        
+        // Tagging
         BUILD_TAG      = "${env.BUILD_NUMBER}"
     }
 
     stages {
+        stage('Cleanup Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+
         stage('Checkout') {
             steps {
+                // Pulls your 'CodePipeline-Test-Success' repo
                 checkout scm
             }
         }
 
         stage('ECR Login') {
             steps {
-                sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_URL}"
+                script {
+                    sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_URL}"
+                }
             }
         }
 
-        stage('Build & Tag') {
+        stage('Build Image') {
             steps {
                 script {
-                    // Build with --no-cache to ensure a fresh image every time
+                    // Forces a fresh build to avoid stale cache issues
                     sh "docker build --no-cache -t ${ECR_REPO_NAME}:latest ."
-                    
-                    // Tag 1: The specific build number (e.g., 6, 7, 8)
-                    sh "docker tag ${ECR_REPO_NAME}:latest ${FULL_IMAGE_NAME}:${BUILD_TAG}"
-                    
-                    // Tag 2: The 'latest' pointer
-                    sh "docker tag ${ECR_REPO_NAME}:latest ${FULL_IMAGE_NAME}:latest"
                 }
             }
         }
 
         stage('Push to ECR') {
             steps {
-                sh "docker push ${FULL_IMAGE_NAME}:${BUILD_TAG}"
-                sh "docker push ${FULL_IMAGE_NAME}:latest"
+                script {
+                    // Tag with Build Number for History
+                    sh "docker tag ${ECR_REPO_NAME}:latest ${FULL_IMAGE_NAME}:${BUILD_TAG}"
+                    // Tag as Latest for Deployment
+                    sh "docker tag ${ECR_REPO_NAME}:latest ${FULL_IMAGE_NAME}:latest"
+                    
+                    sh "docker push ${FULL_IMAGE_NAME}:${BUILD_TAG}"
+                    sh "docker push ${FULL_IMAGE_NAME}:latest"
+                }
             }
         }
 
-        stage('Cleanup & Retention') {
+        stage('Local Deploy (Test)') {
             steps {
                 script {
-                    echo "Cleaning up local Docker images to save space on m7i-flex..."
+                    echo "Stopping previous test container if running..."
+                    sh "docker stop mini-app-test || true"
+                    sh "docker rm mini-app-test || true"
+                    
+                    echo "Launching app: Access via http://<EC2-IP>:${EXTERNAL_PORT}"
+                    // Maps Host Port 80 to Container Port 3000
+                    sh "docker run -d --name mini-app-test -p ${EXTERNAL_PORT}:${INTERNAL_PORT} ${FULL_IMAGE_NAME}:latest"
+                }
+            }
+        }
+
+        stage('ECR Retention & Cleanup') {
+            steps {
+                script {
+                    echo "Removing old local images..."
                     sh "docker image prune -f"
                     
-                    echo "Enforcing ECR Retention: Keeping only the last 2 tagged images..."
-                    // This AWS CLI command finds all images except the 2 most recent and deletes them
+                    echo "Keeping only the last 2 images in ECR..."
                     sh """
                         IMAGES_TO_DELETE=\$(aws ecr describe-images --repository-name ${ECR_REPO_NAME} \
                         --query 'imageDetails[?imageTags!=null] | sort_by(@, &imagePushedAt) | [:-2].imageDigest' \
                         --output text)
                         
                         if [ ! -z "\$IMAGES_TO_DELETE" ]; then
-                            for digest in \$IMAGES_TO_DELETE; do
-                                aws ecr batch-delete-image --repository-name ${ECR_REPO_NAME} --image-ids imageDigest=\$digest
-                            done
-                        else
-                            echo "No old images to delete."
-                        fi
-                    """
-                }
-            }
-        }
-    }
-
-    post {
-        success {
-            echo "Successfully pushed Build #${BUILD_TAG} and updated 'latest'. Retention policy applied."
-        }
-    }
-}
+                            for digest in \$IMAGES_TO_DELETE
